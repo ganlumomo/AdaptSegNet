@@ -26,7 +26,7 @@ class MFNDataSet(data.Dataset):
         self.files = []
         self.set = set
 
-        self.id_to_trainid = {0:0, 1:13, 2:11, 3:18, 4:0, 5:0, 6:0, 7:0, 8:0}
+        self.id_to_trainid = {0:255, 1:13, 2:11, 3:18, 4:255, 5:255, 6:255, 7:255, 8:255}
 
         # for split in ["train", "trainval", "val"]:
         for name in self.img_ids:

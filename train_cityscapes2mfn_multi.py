@@ -214,15 +214,15 @@ def validate(model, dataloader, criterion, wandb, args=None):
         print('===>' + clss + ':\t' + str(class_iou[cls_idx]))
     miou = round(np.nanmean(mIoUs) * 100, 2)
     print('===> mIoU: ' + str(miou))
-    #return {
-    #    'loss': losses.avg, 'mIoU': miou, 'classIoU': class_iou, 'classNames': classNames,
-    #}
+    return {
+        'loss': loss, 'mIoU': miou, 'classIoU': class_iou, 'classNames': classNames,
+    }
 
 
 def main():
     """Create the model and start the training."""
 
-    wandb.init(project='adapt_seg_net')
+    wandb.init(project='adapt-seg-net')
 
     device = torch.device("cuda" if not args.cpu else "cpu")
     args.device = device
@@ -484,9 +484,14 @@ def main():
             torch.save(model_D1.state_dict(), osp.join(args.snapshot_dir, 'GTA5_' + str(i_iter) + '_D1.pth'))
             torch.save(model_D2.state_dict(), osp.join(args.snapshot_dir, 'GTA5_' + str(i_iter) + '_D2.pth'))
 
-        if i_iter % 1000 == 0:
+        if i_iter % 2000 == 0:
             print('evaluate model ...')
             validation = validate(model, testloader, seg_loss, wandb, args=args)
+            wandb.log({'val/loss': validation['loss'],
+                       'val/miou': validation['mIoU'],
+                       'val/car': validation['classIoU'][13],
+                       'val/person': validation['classIoU'][11],
+                       'val/bike': validation['classIoU'][18]})
 
 
     #if args.tensorboard:
