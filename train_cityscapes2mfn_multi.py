@@ -13,13 +13,18 @@ import sys
 import os
 import os.path as osp
 import random
-from tensorboardX import SummaryWriter
+import wandb
+#from tensorboardX import SummaryWriter
 
 from model.deeplab_multi import DeeplabMulti
 from model.discriminator import FCDiscriminator
 from utils.loss import CrossEntropy2d
-from dataset.gta5_dataset import GTA5DataSet
+#from dataset.gta5_dataset import GTA5DataSet
 from dataset.cityscapes_dataset import cityscapesDataSet
+from dataset.mfn_dataset import MFNDataSet
+from dataset.labels import trainId2label
+
+torch.backends.cudnn.benchmark = False
 
 IMG_MEAN = np.array((104.00698793, 116.66876762, 122.67891434), dtype=np.float32)
 
@@ -27,13 +32,15 @@ MODEL = 'DeepLab'
 BATCH_SIZE = 1
 ITER_SIZE = 1
 NUM_WORKERS = 4
-DATA_DIRECTORY = './data/GTA5'
-DATA_LIST_PATH = './dataset/gta5_list/train.txt'
+DATA_DIRECTORY = '../thermal-uda/dataset_dir/cityscapes/'
+DATA_LIST_PATH = './dataset/cityscapes_list/train.txt'
 IGNORE_LABEL = 255
-INPUT_SIZE = '1280,720'
-DATA_DIRECTORY_TARGET = './data/Cityscapes/data'
-DATA_LIST_PATH_TARGET = './dataset/cityscapes_list/train.txt'
-INPUT_SIZE_TARGET = '1024,512'
+INPUT_SIZE = '1024,512'
+
+DATA_DIRECTORY_TARGET = '../thermal-uda/dataset_dir/mfn/'
+DATA_LIST_PATH_TARGET = './dataset/mfn_list/train.txt'
+DATA_LIST_PATH_TARGET_TEST = './dataset/mfn_list/test.txt'
+INPUT_SIZE_TARGET = '640,480'
 LEARNING_RATE = 2.5e-4
 MOMENTUM = 0.9
 NUM_CLASSES = 19
@@ -54,8 +61,8 @@ LAMBDA_ADV_TARGET1 = 0.0002
 LAMBDA_ADV_TARGET2 = 0.001
 GAN = 'Vanilla'
 
-TARGET = 'cityscapes'
-SET = 'train'
+TARGET = 'mfn'
+SET = 'training'
 
 
 def get_arguments():
@@ -86,6 +93,8 @@ def get_arguments():
     parser.add_argument("--data-dir-target", type=str, default=DATA_DIRECTORY_TARGET,
                         help="Path to the directory containing the target dataset.")
     parser.add_argument("--data-list-target", type=str, default=DATA_LIST_PATH_TARGET,
+                        help="Path to the file listing the images in the target dataset.")
+    parser.add_argument("--data-list-target-test", type=str, default=DATA_LIST_PATH_TARGET_TEST,
                         help="Path to the file listing the images in the target dataset.")
     parser.add_argument("--input-size-target", type=str, default=INPUT_SIZE_TARGET,
                         help="Comma-separated string with height and width of target images.")
@@ -160,11 +169,63 @@ def adjust_learning_rate_D(optimizer, i_iter):
     if len(optimizer.param_groups) > 1:
         optimizer.param_groups[1]['lr'] = lr * 10
 
+def step(model, data, target, criterion, args):
+    data, target = data.to(args.device), target.long().to(args.device)
+    _, output = model(data)
+    w, h = map(int, args.input_size_target.split(','))
+    input_size_target = (w, h)
+    interp_target = nn.Upsample(size=(input_size_target[1], input_size_target[0]), mode='bilinear', align_corners=True)
+    output = interp_target(output)
+    loss = criterion(output, target)
+    return output, loss
+
+def fast_hist(a, b, n):
+    k = (a >= 0) & (a < n) & (b >= 0) & (b < n)
+    return np.bincount(n * a[k].astype(int) + b[k], minlength=n ** 2).reshape(n, n)
+
+def per_class_iu(hist):
+    return np.diag(hist) / (hist.sum(1) + hist.sum(0) - np.diag(hist))
+
+def validate(model, dataloader, criterion, wandb, args=None):
+    model.eval()
+    classNames = [trainId2label[trainId].name for trainId in range(args.num_classes)]
+    class_iou = np.zeros(len(classNames))
+    hist = np.zeros((args.num_classes, args.num_classes))
+    with torch.no_grad():
+        for iter_i, (data, target, _, _) in enumerate(dataloader):
+            bs = target.size(0)
+            output, loss = step(model, data, target, criterion, args)
+            output = np.asarray(np.argmax(output.cpu().numpy(), axis=1), dtype=np.uint8)
+            hist += fast_hist(output.flatten(), target.long().cpu().numpy().flatten(), args.num_classes)
+            print('{:d} / {:d}: {:0.2f}'.format(iter_i, len(dataloader), 100*np.mean(per_class_iu(hist))))
+            # wandb visualization
+            if iter_i % 30 == 0:
+                raw_img = np.transpose(data[0].cpu().numpy(), (1, 2, 0))
+                raw = wandb.Image(raw_img)
+                pred_mask = output[0]
+                pred = wandb.Image(raw_img, masks={"prediction" : {"mask_data": pred_mask}})
+                gt_mask = target[0].cpu().numpy()
+                gt = wandb.Image(raw_img, masks={"ground_turth" : {"mask_data": gt_mask}})
+                wandb.log({"raw_img" : raw, "pred": pred, "gt": gt})
+
+    mIoUs = per_class_iu(hist)
+    for cls_idx, clss in enumerate(classNames):
+        class_iou[cls_idx] = round(mIoUs[cls_idx] * 100, 2)
+        print('===>' + clss + ':\t' + str(class_iou[cls_idx]))
+    miou = round(np.nanmean(mIoUs) * 100, 2)
+    print('===> mIoU: ' + str(miou))
+    #return {
+    #    'loss': losses.avg, 'mIoU': miou, 'classIoU': class_iou, 'classNames': classNames,
+    #}
+
 
 def main():
     """Create the model and start the training."""
 
+    wandb.init(project='adapt_seg_net')
+
     device = torch.device("cuda" if not args.cpu else "cpu")
+    args.device = device
 
     w, h = map(int, args.input_size.split(','))
     input_size = (w, h)
@@ -195,7 +256,7 @@ def main():
     model.train()
     model.to(device)
 
-    cudnn.benchmark = True
+    #cudnn.benchmark = True
 
     # init D
     model_D1 = FCDiscriminator(num_classes=args.num_classes).to(device)
@@ -211,23 +272,28 @@ def main():
         os.makedirs(args.snapshot_dir)
 
     trainloader = data.DataLoader(
-        GTA5DataSet(args.data_dir, args.data_list, max_iters=args.num_steps * args.iter_size * args.batch_size,
+        cityscapesDataSet(args.data_dir, args.data_list, max_iters=args.num_steps * args.iter_size * args.batch_size,
                     crop_size=input_size,
-                    scale=args.random_scale, mirror=args.random_mirror, mean=IMG_MEAN),
+                    scale=args.random_scale, mirror=args.random_mirror, set=args.set),
         batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True)
 
     trainloader_iter = enumerate(trainloader)
 
-    targetloader = data.DataLoader(cityscapesDataSet(args.data_dir_target, args.data_list_target,
+    targetloader = data.DataLoader(MFNDataSet(args.data_dir_target, args.data_list_target,
                                                      max_iters=args.num_steps * args.iter_size * args.batch_size,
                                                      crop_size=input_size_target,
-                                                     scale=False, mirror=args.random_mirror, mean=IMG_MEAN,
-                                                     set=args.set),
+                                                     scale=False, mirror=args.random_mirror, set=args.set),
                                    batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
                                    pin_memory=True)
 
 
     targetloader_iter = enumerate(targetloader)
+
+    testloader = data.DataLoader(MFNDataSet(args.data_dir_target, args.data_list_target_test,
+                                                     crop_size=input_size_target,
+                                                     scale=False, mirror=args.random_mirror, set='test'),
+                                   batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
+                                   pin_memory=True)
 
     # implement model.optim_parameters(args) to handle different models' lr setting
 
@@ -259,7 +325,7 @@ def main():
         if not os.path.exists(args.log_dir):
             os.makedirs(args.log_dir)
 
-        writer = SummaryWriter(args.log_dir)
+        #writer = SummaryWriter(args.log_dir)
 
     for i_iter in range(args.num_steps):
 
@@ -315,7 +381,7 @@ def main():
             # train with target
 
             _, batch = targetloader_iter.__next__()
-            images, _, _ = batch
+            images, _, _, _ = batch
             images = images.to(device)
 
             pred_target1, pred_target2 = model(images)
@@ -388,19 +454,17 @@ def main():
         optimizer_D1.step()
         optimizer_D2.step()
 
-        if args.tensorboard:
-            scalar_info = {
-                'loss_seg1': loss_seg_value1,
-                'loss_seg2': loss_seg_value2,
-                'loss_adv_target1': loss_adv_target_value1,
-                'loss_adv_target2': loss_adv_target_value2,
-                'loss_D1': loss_D_value1,
-                'loss_D2': loss_D_value2,
-            }
+        scalar_info = {
+            'loss_seg1': loss_seg_value1,
+            'loss_seg2': loss_seg_value2,
+            'loss_adv_target1': loss_adv_target_value1,
+            'loss_adv_target2': loss_adv_target_value2,
+            'loss_D1': loss_D_value1,
+            'loss_D2': loss_D_value2,
+        }
 
-            if i_iter % 10 == 0:
-                for key, val in scalar_info.items():
-                    writer.add_scalar(key, val, i_iter)
+        if i_iter % 10 == 0:
+            wandb.log({key : val for key, val in scalar_info.items()})
 
         print('exp = {}'.format(args.snapshot_dir))
         print(
@@ -420,8 +484,13 @@ def main():
             torch.save(model_D1.state_dict(), osp.join(args.snapshot_dir, 'GTA5_' + str(i_iter) + '_D1.pth'))
             torch.save(model_D2.state_dict(), osp.join(args.snapshot_dir, 'GTA5_' + str(i_iter) + '_D2.pth'))
 
-    if args.tensorboard:
-        writer.close()
+        if i_iter % 1000 == 0:
+            print('evaluate model ...')
+            validation = validate(model, testloader, seg_loss, wandb, args=args)
+
+
+    #if args.tensorboard:
+    #    writer.close()
 
 
 if __name__ == '__main__':

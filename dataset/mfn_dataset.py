@@ -8,10 +8,10 @@ import torch
 import torchvision
 from torch.utils import data
 from PIL import Image
-from dataset.labels import id2label
 
-class cityscapesDataSet(data.Dataset):
-    def __init__(self, root, list_path, max_iters=None, crop_size=(321, 321), mean=(103.53, 116.28, 123.675), scale=True, mirror=True, ignore_label=255, set='val'):
+
+class MFNDataSet(data.Dataset):
+    def __init__(self, root, list_path, max_iters=None, crop_size=(321, 321), mean=(100.8296, 100.8296, 100.8296), scale=True, mirror=True, ignore_label=255, set='training'):
         self.root = root
         self.list_path = list_path
         self.crop_size = crop_size
@@ -25,10 +25,13 @@ class cityscapesDataSet(data.Dataset):
             self.img_ids = self.img_ids * int(np.ceil(float(max_iters) / len(self.img_ids)))
         self.files = []
         self.set = set
+
+        self.id_to_trainid = {0:0, 1:13, 2:11, 3:18, 4:0, 5:0, 6:0, 7:0, 8:0}
+
         # for split in ["train", "trainval", "val"]:
         for name in self.img_ids:
             img_file = osp.join(self.root, "images/%s/%s" % (self.set, name))
-            label_file = osp.join(self.root, "annotations/%s/%s" % (self.set, name)).replace('leftImg8bit.png', 'gtFine_labelIds.png')
+            label_file = osp.join(self.root, "annotations/%s/%s" % (self.set, name)).replace('jpg', 'png')
             self.files.append({
                 "img": img_file,
                 "label": label_file,
@@ -37,6 +40,7 @@ class cityscapesDataSet(data.Dataset):
 
     def __len__(self):
         return len(self.files)
+
 
     def __getitem__(self, index):
         datafiles = self.files[index]
@@ -52,10 +56,10 @@ class cityscapesDataSet(data.Dataset):
         image = np.asarray(image, np.float32)
         label = np.asarray(label, np.float32)
 
-        # Cityscapes id to trainId
+        # re-assign labels to match the format of Cityscapes
         label_copy = 255 * np.ones(label.shape, dtype=np.float32)
-        for k, v in id2label.items():
-            label_copy[label == k] = v.trainId
+        for k, v in self.id_to_trainid.items():
+            label_copy[label == k] = v
 
         size = image.shape
         image = image[:, :, ::-1]  # change to BGR
